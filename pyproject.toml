@@ -1,0 +1,49 @@
+[project]
+name = "audio-speaker-extractor"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "whisperx==3.8.6",
+    "soundfile==0.13.1",
+    "numpy==2.3.5",
+    "transformers==4.57.1",
+    "python-dotenv==1.2.1",
+]
+
+[project.optional-dependencies]
+cpu = ["torch==2.8.0", "torchaudio==2.8.0", "torchvision==0.23.0"]
+cuda = ["torch==2.8.0", "torchaudio==2.8.0", "torchvision==0.23.0"]
+
+[dependency-groups]
+dev = ["pytest==8.4.2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "cuda" },
+]
+torchaudio = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "cuda" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "cuda" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
