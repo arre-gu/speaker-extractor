@@ -11,7 +11,7 @@ import soundfile as sf
 
 from extract_main_speaker import (
     BatchError, Turn, Utterance, WhisperXBackend, build_utterances, coverage,
-    parse_args, parse_prefix, plan_clips, preflight, run, select_main_speaker,
+    parse_args, parse_prefix, plan_clips, preflight, run,
 )
 
 
@@ -86,14 +86,30 @@ def test_utterance_splits_and_unassigned_words():
     ]
 
 
-def test_speaker_selection_by_count_and_ties():
-    a = Utterance(0, 1, "A", ["a"])
-    b = Utterance(3, 4, "B", ["b"])
-    assert select_main_speaker([]) is None
-    assert select_main_speaker([a, b]) == "A"  # earliest
-    assert select_main_speaker([a, Utterance(2, 5, "B", ["b"])]) == "B"
-    assert select_main_speaker([a, Utterance(2, 3, "A", ["a"]),
-                                Utterance(4, 50, "B", ["b"])]) == "A"
+def test_every_speaker_exported_despite_dominant_tts(tmp_path):
+    utterances = [Utterance(4, 5, "PERSON", ["reply"]),
+                  Utterance(0, 1, "TTS", ["prompt"]),
+                  Utterance(2, 3, "TTS", ["prompt"])]
+    turns = [Turn(u.start, u.end, u.speaker) for u in utterances]
+    clips = plan_clips(utterances, turns, "p", np.ones((6000, 1)),
+                       1000, settings(tmp_path))
+    assert [c["speaker"] for c in clips] == ["TTS", "TTS", "PERSON"]
+    assert [c["filename"] for c in clips] == ["p_1.wav", "p_2.wav", "p_3.wav"]
+    assert all(c["eligible"] for c in clips)
+    assert plan_clips([], [], "p", np.ones((100, 1)), 1000, settings(tmp_path)) == []
+
+
+def test_overlap_rejected_for_each_speaker(tmp_path):
+    utterances = [Utterance(0, 1, "A", ["a"]), Utterance(0.5, 1.5, "B", ["b"]),
+                  Utterance(2, 3, "B", ["clean"]), Utterance(3, 4, "A", ["clean"])]
+    turns = [Turn(u.start, u.end, u.speaker) for u in utterances]
+    clips = plan_clips(utterances, turns, "p", np.ones((5000, 1)),
+                       1000, settings(tmp_path))
+    assert [c["ordinal"] for c in clips if c["eligible"]] == [3, 4]
+    assert clips[0]["rejection_reasons"] == ["other_speaker_overlap"]
+    assert clips[1]["rejection_reasons"] == ["other_speaker_overlap"]
+    assert clips[2]["end_sample"] == 3000
+    assert clips[3]["start_sample"] == 3000
 
 
 def test_overlap_numbering_padding_and_quality_filters(tmp_path):
@@ -103,9 +119,8 @@ def test_overlap_numbering_padding_and_quality_filters(tmp_path):
                   Utterance(3.1, 3.2, "A", ["three"]),
                   Utterance(4, 5, "A", ["four"])]
     turns = [Turn(0, 5, "A"), Turn(1.5, 1.6, "B"), Turn(0.85, 0.95, "B")]
-    main, clips = plan_clips(utterances, turns, "40_FEMALE_0010",
+    clips = plan_clips(utterances, turns, "40_FEMALE_0010",
                              np.full((6000, 2), 0.1), 1000, args)
-    assert main == "A"
     assert [c["ordinal"] for c in clips if c["eligible"]] == [1, 4]
     assert clips[0]["start_sample"] == 0
     assert clips[0]["end_sample"] == 850
@@ -115,7 +130,7 @@ def test_overlap_numbering_padding_and_quality_filters(tmp_path):
     args.max_duration = 0.6
     args.min_rms_dbfs = -10
     args.min_speech_ratio = 0.9
-    _, clips = plan_clips([utterances[0]], [Turn(0.05, 0.15, "A")], "p",
+    clips = plan_clips([utterances[0]], [Turn(0.05, 0.15, "A")], "p",
                           np.zeros((1000, 1)), 1000, args)
     assert set(clips[0]["rejection_reasons"]) == {
         "too_long", "too_few_words", "below_rms_threshold", "low_speech_ratio"
@@ -131,7 +146,7 @@ class FakeBackend:
         pass
 
     def analyze(self, path):
-        return "en", [word(0.2, 1), word(2, 2.2), word(4, 5)], [Turn(0, 6, "A")]
+        return "en", [word(0.2, 1), word(2, 2.2), word(4, 5)], [Turn(0, 3, "A"), Turn(4, 6, "B")]
 
 
 @pytest.mark.parametrize("existing", [None, "existing-test-token"])
@@ -168,8 +183,10 @@ def test_dry_run_matches_export_without_writes(tmp_path, capsys):
     args.dry_run = False
     assert run(args, FakeBackend) == 0
     manifest = json.loads((args.output_dir / "40_FEMALE_0010_manifest.json").read_text())
-    assert manifest["selected_speaker"] == "A"
-    assert manifest["speaker_counts"] == {"A": 3}
+    assert manifest["speaker_selection"] == "all"
+    assert "selected_speaker" not in manifest
+    assert manifest["speaker_counts"] == {"A": 2, "B": 1}
+    assert [c["speaker"] for c in manifest["clips"] if c["eligible"]] == ["A", "B"]
     assert manifest["language"] == "en"
     original, rate = sf.read(path, always_2d=True)
     for clip in manifest["clips"]:
@@ -291,7 +308,7 @@ def test_nonfinite_word_timestamp_is_manifest_safe(tmp_path):
 
 def test_padding_clamped_to_end_and_sample_grid(tmp_path):
     args = settings(tmp_path)
-    _, clips = plan_clips(
+    clips = plan_clips(
         [Utterance(0.31, 1, "A", ["hello"])],
         [Turn(0.31, 1, "A"), Turn(0.1, 0.2555, "B")],
         "p", np.ones((1000, 1)), 1000, args,

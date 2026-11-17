@@ -1,9 +1,9 @@
-"""Extract pause-separated utterances belonging to a recording's main speaker."""
+"""Extract non-overlapping, pause-separated utterances from every speaker."""
 
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import asdict, dataclass
 import json
 import math
@@ -144,31 +144,17 @@ def build_utterances(
     return utterances, excluded
 
 
-def select_main_speaker(utterances: list[Utterance]) -> str | None:
-    """Rank by utterance count, duration, first appearance, then stable label."""
-    grouped = defaultdict(list)
-    for utterance in utterances:
-        grouped[utterance.speaker].append(utterance)
-    return min(grouped, key=lambda speaker: (
-        -len(grouped[speaker]),
-        -sum(u.end - u.start for u in grouped[speaker]),
-        min(u.start for u in grouped[speaker]),
-        speaker,
-    )) if grouped else None
-
-
 def plan_clips(
     utterances: list[Utterance], turns: list[Turn], prefix: str,
     audio: np.ndarray, sample_rate: int, args: argparse.Namespace,
-) -> tuple[str | None, list[dict[str, Any]]]:
+) -> list[dict[str, Any]]:
     """Make all export decisions once, shared by real and dry runs."""
-    main = select_main_speaker(utterances)
     decisions = []
     duration = len(audio) / sample_rate
-    selected = sorted((u for u in utterances if u.speaker == main), key=lambda u: u.start)
+    selected = sorted(utterances, key=lambda u: (u.start, u.end, u.speaker))
     for ordinal, utterance in enumerate(selected, 1):
         reasons = []
-        others = [t for t in turns if t.speaker != main]
+        others = [t for t in turns if t.speaker != utterance.speaker]
         if any(t.start < utterance.end and t.end > utterance.start for t in others):
             reasons.append("other_speaker_overlap")
         if utterance.start >= duration or utterance.end > duration:
@@ -206,7 +192,7 @@ def plan_clips(
             reasons.append("low_speech_ratio")
         decisions.append({
             "ordinal": ordinal, "filename": f"{prefix}_{ordinal}.wav",
-            "speaker": main, "text": " ".join(utterance.words),
+            "speaker": utterance.speaker, "text": " ".join(utterance.words),
             "speech_start": utterance.start, "speech_end": utterance.end,
             "start_sample": first, "end_sample": last,
             "start": first / sample_rate, "end": last / sample_rate,
@@ -214,7 +200,7 @@ def plan_clips(
             "speech_ratio": speech_ratio, "rejection_reasons": reasons,
             "eligible": not reasons, "saved": False,
         })
-    return main, decisions
+    return decisions
 
 
 class WhisperXBackend:
@@ -334,10 +320,10 @@ def run(args: argparse.Namespace, backend_factory: Any = WhisperXBackend) -> int
                 raise ValueError("Audio exceeds PCM range; refusing to clip its signal")
             language, words, turns = backend.analyze(path)
             utterances, excluded = build_utterances(words, turns, args.pause_threshold)
-            main, clips = plan_clips(utterances, turns, prefix, audio, sample_rate, args)
+            clips = plan_clips(utterances, turns, prefix, audio, sample_rate, args)
             record.update({
                 "language": language, "sample_rate": sample_rate,
-                "channels": audio.shape[1], "selected_speaker": main,
+                "channels": audio.shape[1], "speaker_selection": "all",
                 "speaker_counts": dict(Counter(u.speaker for u in utterances)),
                 "utterances": [asdict(u) for u in utterances],
                 "diarization": [asdict(t) for t in turns],
@@ -362,13 +348,13 @@ def run(args: argparse.Namespace, backend_factory: Any = WhisperXBackend) -> int
         eligible = [c for c in clips if c["eligible"]]
         saved = [c for c in clips if c["saved"]]
         rejected = Counter(reason for c in clips for reason in c["rejection_reasons"])
-        print(f"{path.name}: speaker={record.get('selected_speaker')}, "
+        print(f"{path.name}: speakers={record.get('speaker_counts', {})}, "
               f"candidates={len(clips)}, would_save={len(eligible)}, "
               f"duration={sum(c['duration'] for c in eligible):.3f}s, "
               f"saved={len(saved)}, rejections={dict(rejected)}")
         for clip in eligible:
             print(f"  {'WOULD SAVE' if args.dry_run else 'SAVED' if clip['saved'] else 'NOT SAVED'} "
-                  f"{clip['filename']}")
+                  f"{clip['filename']} (speaker={clip['speaker']})")
         if not args.dry_run:
             try:
                 args.output_dir.mkdir(parents=True, exist_ok=True)

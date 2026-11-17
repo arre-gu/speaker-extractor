@@ -1,5 +1,9 @@
 # Audio speaker extractor
 
+Extracts non-overlapping, transcribed speech from **every detected speaker**,
+including TTS voices, for manual review. No main speaker is chosen. The existing
+`extract_main_speaker.py` command name is retained for compatibility.
+
 This is a standalone uv project using Python 3.12 and WhisperX 3.8.6. It has its
 own `pyproject.toml`, `uv.lock`, tests, and `.venv`, with no imports or dependencies
 on the parent training project. The entire directory can be used independently.
@@ -72,7 +76,7 @@ uv run --extra cuda --locked python extract_main_speaker.py "data/raw_recordings
 ```
 
 Dry-run performs full transcription, alignment, diarization, and filtering. It
-prints every proposed filename, the selected speaker, candidate utterance count,
+prints every proposed filename and speaker label, per-speaker utterance counts,
 would-save clip count, total would-save duration, rejection counts, and batch
 totals including failures. It creates no output directory, clips, or manifests.
 It still takes full inference time and may download models into library caches.
@@ -107,16 +111,23 @@ RespCam_Anonymous 29-04-26 16h18m_Scene camera 1_(40,FEMALE,1010).wav
 
 Metadata must appear in a trailing `(AGE,GENDER,ID)` group. Spaces around fields
 are allowed, gender is uppercased, and leading ID zeros are preserved. File
-extensions are case-insensitive. X is the main speaker's chronological utterance
-number in that recording, starting at 1 **before filtering**, so missing numbers
-represent rejected utterances.
+extensions are case-insensitive. X is the chronological utterance number across
+**all speakers** in that recording, starting at 1 **before filtering**, so missing
+numbers represent rejected utterances. The clip's detected speaker is stored in
+the manifest. AGE/GENDER/ID are inherited recording metadata, not verified
+demographics or identity of every exported voice. Speaker labels are local to
+each recording and are not matched across recordings.
 
 An utterance joins adjacent aligned words from the same speaker until a pause
 exceeds 0.7 seconds, a speaker changes, another speaker intervenes, or an
-untimed/unassigned word occurs. Selection counts these utterances before clip
-filters. Ties use total utterance duration, earliest appearance, then speaker
-label. Speaker labels are local to each recording. Untimed/unassigned words are
-excluded and recorded in the manifest; silence produces zero clips.
+untimed/unassigned word occurs. All speakers' utterances pass through the same
+quality filters. Untimed/unassigned words are excluded and recorded in the
+manifest; silence produces zero clips. Only transcribed, aligned words are
+exported; this does not export untranscribed speech or nonverbal sounds.
+
+Use a fresh output folder when re-extracting earlier recordings: the collision
+checks protect existing clips, and old manifests cannot restore speakers that
+were previously discarded.
 
 All output clips share a flat directory. The script validates the complete batch
 before loading models, rejecting malformed filenames, duplicate `AGE_GENDER_ID`
@@ -137,7 +148,7 @@ your recordings. All durations are seconds.
 
 | Flag | Default | Effect |
 |---|---:|---|
-| `--pause-threshold` | 0.7 | Longer gaps split utterances; also affects main-speaker counts. |
+| `--pause-threshold` | 0.7 | Longer gaps split utterances. |
 | `--min-duration` | 0.5 | Reject shorter unpadded utterances; lower for brief replies. |
 | `--max-duration` | Off | Reject longer unpadded utterances without splitting them. |
 | `--min-words` | 1 | Raise to exclude fragments, losing some valid replies. |
@@ -168,6 +179,35 @@ speakers. It does not remove simultaneous voices, environmental noise, or music
 from retained audio. Listen to clips from a small first batch before producing
 the complete dataset. Strong RMS or word-count filters can bias the dataset
 against quiet speech, hesitations, and unusual speech patterns.
+
+## Review clips with the single-file Windows GUI
+
+From this directory, launch the reviewer with the output folder:
+
+```powershell
+uv run --no-sync python review_clips.py "data/main_speaker"
+```
+
+`review_clips.py` is independent of WhisperX and uses only Python's standard
+library (Tkinter and Windows `winsound`). It can also run with a normal Python
+installation that includes Tkinter: `python review_clips.py "C:\Dataset\Clips"`.
+Omit the folder argument to choose a folder in the GUI. It works with older
+exports and plain WAV folders too, but transcript/speaker details require manifests.
+
+- Autoplay each clip, press **K** to keep or **R** to reject and advance.
+- Press **Space** to play/stop, **Left/Right** to navigate, and **U** to undo the
+  last decision. Autoplay can be turned off. Skip advances without a decision.
+- Filter by pending/all/kept/rejected clips and by recording + speaker. This makes
+  it easy to browse voices without assuming a speaker is a real person or TTS.
+- Decisions save immediately to `.review.json` beside the clips. Reopening the
+  folder resumes with pending clips. Undo covers the current session only.
+- **Copy kept clips…** copies only kept WAVs to a separate folder and refuses
+  collisions. Originals are never moved or deleted. Export copies clips only;
+  retain the original manifests and `.review.json` for provenance.
+
+Playback makes a temporary PCM16 copy for Windows compatibility; exported kept
+clips are byte-for-byte copies of the original PCM32 files. The reviewer does
+not relabel recording demographics or automatically identify synthetic voices.
 
 ## Failures, manifests, and verification
 
