@@ -185,7 +185,7 @@ def test_dry_run_matches_export_without_writes(tmp_path, capsys):
     manifest = json.loads((args.output_dir / "40_FEMALE_0010_manifest.json").read_text())
     assert manifest["speaker_selection"] == "all"
     assert "selected_speaker" not in manifest
-    assert manifest["speaker_counts"] == {"A": 2, "B": 1}
+    assert manifest["speaker_counts"] == {"A": 1, "B": 1}
     assert [c["speaker"] for c in manifest["clips"] if c["eligible"]] == ["A", "B"]
     assert manifest["language"] == "en"
     original, rate = sf.read(path, always_2d=True)
@@ -318,11 +318,65 @@ def test_padding_clamped_to_end_and_sample_grid(tmp_path):
     assert clips[0]["eligible"]
 
 
+def test_natural_pause_merged_but_speaker_change_preserved(tmp_path):
+    args = settings(tmp_path)
+    assert args.pause_threshold == 1.2
+    words = [word(0, 0.5), word(1.5, 2), word(2.05, 3)]
+    turns = [Turn(0, 2, "A"), Turn(2.05, 3, "B")]
+    utterances, _ = build_utterances(words, turns, args.pause_threshold)
+    assert [(u.speaker, len(u.words)) for u in utterances] == [("A", 2), ("B", 1)]
+    shorter, _ = build_utterances(words, turns, 0.7)
+    assert len(shorter) == 3
+
+
+def test_later_response_survives_short_leading_overlap(tmp_path):
+    args = settings(tmp_path)
+    utterances = [Utterance(0, 1.2, "TTS", ["prompt"]),
+                  Utterance(1, 2, "HUMAN", ["reply"])]
+    turns = [Turn(0, 1.2, "TTS"), Turn(1, 2, "HUMAN")]
+    clips = plan_clips(utterances, turns, "p", np.ones((3000, 1)), 1000, args)
+    assert clips[0]["rejection_reasons"] == ["other_speaker_overlap"]
+    assert clips[1]["eligible"]
+    assert clips[1]["start_sample"] == 1200
+    assert clips[1]["trimmed_leading_seconds"] == pytest.approx(0.2)
+    assert clips[1]["retained_speech_start"] == pytest.approx(1.2)
+    args.handoff_trim = 0
+    strict = plan_clips(utterances, turns, "p", np.ones((3000, 1)), 1000, args)
+    assert not strict[1]["eligible"]
+
+
+@pytest.mark.parametrize("tts_start, tts_end, human_start, human_end", [
+    (0, 1.5, 1, 2),       # more leading overlap than allowed
+    (1, 1.2, 0, 2),       # internal interruption by a later voice
+    (1, 1.2, 1, 2),       # simultaneous starts: no later speaker
+    (0, 2, 1, 1.1),       # entire reply overlaps
+])
+def test_handoff_never_keeps_overlapping_audio(
+    tmp_path, tts_start, tts_end, human_start, human_end
+):
+    turns = [Turn(tts_start, tts_end, "TTS"), Turn(human_start, human_end, "HUMAN")]
+    clips = plan_clips([Utterance(human_start, human_end, "HUMAN", ["reply"])],
+                       turns, "p", np.ones((3000, 1)), 1000, settings(tmp_path))
+    assert "other_speaker_overlap" in clips[0]["rejection_reasons"]
+
+
+def test_short_replies_use_retained_duration_threshold(tmp_path):
+    utterances = [Utterance(1, 1.5, "HUMAN", ["yes"])]
+    turns = [Turn(0, 1.2, "TTS"), Turn(1, 1.5, "HUMAN")]
+    args = settings(tmp_path)
+    clips = plan_clips(utterances, turns, "p", np.ones((2000, 1)), 1000, args)
+    assert clips[0]["rejection_reasons"] == ["too_short"]
+    args.min_duration = 0.2
+    clips = plan_clips(utterances, turns, "p", np.ones((2000, 1)), 1000, args)
+    assert clips[0]["eligible"]
+
+
 @pytest.mark.parametrize("flags", [
     ["--padding", "-1"], ["--pause-threshold", "nan"],
     ["--min-speakers", "3", "--max-speakers", "2"],
     ["--min-speech-ratio", "1.1"], ["--max-duration", "0"],
     ["--vad-offset", "0.8"], ["--device", "cpu", "--compute-type", "float16"],
+    ["--handoff-trim", "-0.1"],
 ])
 def test_invalid_settings(tmp_path, flags):
     with pytest.raises(SystemExit):

@@ -155,14 +155,28 @@ def plan_clips(
     for ordinal, utterance in enumerate(selected, 1):
         reasons = []
         others = [t for t in turns if t.speaker != utterance.speaker]
-        if any(t.start < utterance.end and t.end > utterance.start for t in others):
+        retained_start = utterance.start
+        leading_others = [t for t in others if t.start <= utterance.start < t.end]
+        own_starts = [t.start for t in turns if t.speaker == utterance.speaker
+                      and t.start < utterance.end and t.end > utterance.start]
+        if leading_others and own_starts and args.handoff_trim > 0:
+            own_start = min(own_starts)
+            candidate_start = max(utterance.start, own_start,
+                                  max(t.end for t in leading_others))
+            # Favor only a later-starting speaker. Never remove overlap labels or
+            # include mixed audio: discard the short overlapping prefix instead.
+            if (all(t.start < own_start for t in leading_others)
+                    and candidate_start < utterance.end
+                    and candidate_start - utterance.start <= args.handoff_trim + 1e-9):
+                retained_start = candidate_start
+        if any(t.start < utterance.end and t.end > retained_start for t in others):
             reasons.append("other_speaker_overlap")
         if utterance.start >= duration or utterance.end > duration:
             reasons.append("timestamp_out_of_bounds")
-        start = max(0.0, utterance.start - args.padding)
+        start = max(0.0, retained_start - args.padding)
         end = min(duration, utterance.end + args.padding)
         for turn in others:
-            if turn.end <= utterance.start:
+            if turn.end <= retained_start:
                 start = max(start, turn.end)
             if turn.start >= utterance.end:
                 end = min(end, turn.start)
@@ -170,7 +184,7 @@ def plan_clips(
         first = min(len(audio), max(0, math.ceil(start * sample_rate)))
         last = min(len(audio), max(first, math.floor(end * sample_rate)))
         clip_duration = (last - first) / sample_rate
-        speech_duration = utterance.end - utterance.start
+        speech_duration = utterance.end - retained_start
         if speech_duration < args.min_duration or last <= first:
             reasons.append("too_short")
         if args.max_duration is not None and speech_duration > args.max_duration:
@@ -194,6 +208,8 @@ def plan_clips(
             "ordinal": ordinal, "filename": f"{prefix}_{ordinal}.wav",
             "speaker": utterance.speaker, "text": " ".join(utterance.words),
             "speech_start": utterance.start, "speech_end": utterance.end,
+            "retained_speech_start": retained_start,
+            "trimmed_leading_seconds": retained_start - utterance.start,
             "start_sample": first, "end_sample": last,
             "start": first / sample_rate, "end": last / sample_rate,
             "duration": clip_duration, "rms_dbfs": rms_dbfs,
@@ -350,6 +366,7 @@ def run(args: argparse.Namespace, backend_factory: Any = WhisperXBackend) -> int
         rejected = Counter(reason for c in clips for reason in c["rejection_reasons"])
         print(f"{path.name}: speakers={record.get('speaker_counts', {})}, "
               f"candidates={len(clips)}, would_save={len(eligible)}, "
+              f"handoffs_trimmed={sum(c['trimmed_leading_seconds'] > 0 for c in eligible)}, "
               f"duration={sum(c['duration'] for c in eligible):.3f}s, "
               f"saved={len(saved)}, rejections={dict(rejected)}")
         for clip in eligible:
@@ -395,7 +412,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
     parser.add_argument("--compute-type", choices=["auto", "float16", "float32", "int8"], default="auto")
-    parser.add_argument("--pause-threshold", type=float, default=0.7)
+    parser.add_argument("--pause-threshold", type=float, default=1.2,
+                        help="Split same-speaker speech at pauses longer than this (default: 1.2)")
+    parser.add_argument("--handoff-trim", type=float, default=0.3, help=(
+        "Maximum leading overlap to trim from a later speaker's utterance, in seconds "
+        "(default: 0.3). Use 0 for strict whole-utterance rejection."
+    ))
     parser.add_argument("--min-duration", type=float, default=0.5,
                         help="Minimum unpadded utterance duration in seconds (default: 0.5)")
     parser.add_argument("--max-duration", type=float,
@@ -413,7 +435,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     for name, value in vars(args).items():
         if isinstance(value, float) and not math.isfinite(value):
             parser.error(f"--{name.replace('_', '-')} must be finite")
-    for name in ("pause_threshold", "min_duration", "padding"):
+    for name in ("pause_threshold", "handoff_trim", "min_duration", "padding"):
         if getattr(args, name) < 0:
             parser.error(f"--{name.replace('_', '-')} must be nonnegative")
     for name in ("batch_size", "min_words", "min_speakers", "max_speakers"):

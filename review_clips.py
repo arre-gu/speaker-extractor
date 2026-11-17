@@ -264,7 +264,8 @@ class ClipReviewer:
         self.details.configure(text=(
             f"{self.current.name}\n{self.group(self.current)}\n"
             f"Source: {Path(meta.get('source', '')).name}\n"
-            f"Duration: {meta.get('duration', '?')} s"
+            f"Duration: {meta.get('duration', '?')} s\n"
+            f"Leading handoff trimmed: {meta.get('trimmed_leading_seconds', 0):.3f} s"
         ) if self.current else "No clips in this view. Change the filter to inspect reviewed clips.")
         self.transcript.configure(state="normal")
         self.transcript.delete("1.0", "end")

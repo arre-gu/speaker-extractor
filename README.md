@@ -119,7 +119,7 @@ demographics or identity of every exported voice. Speaker labels are local to
 each recording and are not matched across recordings.
 
 An utterance joins adjacent aligned words from the same speaker until a pause
-exceeds 0.7 seconds, a speaker changes, another speaker intervenes, or an
+exceeds 1.2 seconds, a speaker changes, another speaker intervenes, or an
 untimed/unassigned word occurs. All speakers' utterances pass through the same
 quality filters. Untimed/unassigned words are excluded and recorded in the
 manifest; silence produces zero clips. Only transcribed, aligned words are
@@ -148,8 +148,9 @@ your recordings. All durations are seconds.
 
 | Flag | Default | Effect |
 |---|---:|---|
-| `--pause-threshold` | 0.7 | Longer gaps split utterances. |
-| `--min-duration` | 0.5 | Reject shorter unpadded utterances; lower for brief replies. |
+| `--pause-threshold` | 1.2 | Longer gaps split utterances; increase to 1.5–2 for longer natural pauses. |
+| `--handoff-trim` | 0.3 | Favor a later speaker by trimming up to this much leading overlap; 0 restores strict whole-utterance rejection. |
+| `--min-duration` | 0.5 | Reject shorter retained unpadded utterances; try 0.2 for brief replies. |
 | `--max-duration` | Off | Reject longer unpadded utterances without splitting them. |
 | `--min-words` | 1 | Raise to exclude fragments, losing some valid replies. |
 | `--padding` | 0.1 | Add boundary context; clamp to recording edges and other speakers. |
@@ -163,16 +164,38 @@ your recordings. All durations are seconds.
 | `--device` | `auto` | `cuda` or `cpu` can be selected explicitly. |
 | `--compute-type` | `auto` | Override with `float16`, `float32`, or `int8`. |
 
-Duration limits exclude padding. RMS and speech coverage include padding. Speech
+Duration limits exclude padding and any trimmed leading overlap. RMS and speech coverage include padding. Speech
 ratio uses diarization activity as a speech-coverage proxy, not ASR confidence.
 RMS averages sample energy across channels. Silence is represented by a null RMS
 dBFS value in JSON and fails an enabled RMS threshold. VAD uses Pyannote;
 `--vad-offset` must not exceed `--vad-onset`.
 
-Any detected other-speaker activity inside an utterance rejects the whole
-utterance, including speech inside pauses between its words. Boundary padding
-cannot extend into another detected speaker. This policy is mandatory.
+At a speaker handoff, a later-starting voice takes priority: if an earlier voice
+overlaps only the first 0.3 seconds or less of its utterance, that overlapping
+prefix is removed and the clean remainder is considered for export. Padding
+cannot reintroduce the removed voice. The earlier utterance still fails overlap
+rejection. This can recover a human answer following a TTS prompt without
+including simultaneous speech. It can also trim the beginning of the answer;
+the original transcript is retained for reference and the manifest/reviewer
+shows `trimmed_leading_seconds` and the retained speech start.
+
+This rule uses timing, not human/TTS classification. Longer, internal, trailing,
+or simultaneous-start overlap still rejects the whole utterance, including
+speech inside pauses between words. Set `--handoff-trim 0` for strict rejection
+of every overlapped utterance. Boundary padding cannot extend into another
+detected speaker. Exported clips must still contain no detected other speaker.
 Rejection counts can overlap because a clip can fail several filters.
+
+For recordings with short answers after prompts, start with:
+
+```powershell
+uv run --extra cuda --locked python extract_main_speaker.py "data/raw_recordings" "data/replies_v2" --pause-threshold 1.2 --min-duration 0.2 --handoff-trim 0.3 --dry-run
+```
+
+`--pause-threshold` changes grouping, not detection. Raising it will not bridge
+a speaker change. Short replies can disappear because of `too_short` or
+`other_speaker_overlap` rejection; inspect those reasons in the manifests.
+Speech absent from the transcript cannot be recovered by these settings.
 
 Diarization is imperfect and can miss quiet background voices or confuse
 speakers. It does not remove simultaneous voices, environmental noise, or music
