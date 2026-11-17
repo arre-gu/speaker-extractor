@@ -21,6 +21,16 @@ from typing import Callable
 import wave
 
 
+FIXED_TTS_PATTERN = re.compile(
+    r"\b(?:continue\W+straight|please\W+slow\W+down|attention)\b", re.IGNORECASE
+)
+
+
+def contains_fixed_tts_prompt(text: str) -> bool:
+    """Match fixed prompts regardless of case, punctuation, or whitespace."""
+    return bool(FIXED_TTS_PATTERN.search(text))
+
+
 class ReviewStore:
     """Persist decisions atomically beside the clips and resume on next launch."""
 
@@ -101,9 +111,14 @@ class ReviewStore:
             raise
         return name
 
-    def export_kept(self, destination: Path) -> int:
+    def is_fixed_tts(self, path: Path) -> bool:
+        """Use manifest text only; clips without transcripts remain reviewable."""
+        return contains_fixed_tts_prompt(self.metadata.get(path.name, {}).get("text") or "")
+
+    def export_kept(self, destination: Path, skip_fixed_tts: bool = True) -> int:
         """Copy kept originals with exclusive creation; refuse any collision."""
-        kept = [p for p in self.files if self.decisions.get(p.name) == "keep"]
+        kept = [p for p in self.files if self.decisions.get(p.name) == "keep"
+                and (not skip_fixed_tts or not self.is_fixed_tts(p))]
         if destination.resolve() == self.folder:
             raise ValueError("Choose a separate export folder")
         collisions = [p.name for p in kept if (destination / p.name).exists()]
@@ -163,6 +178,11 @@ class ClipReviewer:
         ttk.Button(toolbar, text="Copy kept clips…", command=self.export).pack(side="left", padx=8)
         self.autoplay = tk.BooleanVar(value=True)
         ttk.Checkbutton(toolbar, text="Autoplay", variable=self.autoplay).pack(side="left")
+        filters = ttk.Frame(root, padding=(10, 0))
+        filters.pack(fill="x")
+        self.skip_fixed_tts = tk.BooleanVar(value=True)
+        ttk.Checkbutton(filters, text="Skip fixed TTS prompts", variable=self.skip_fixed_tts,
+                        command=self.refresh).pack(side="left")
         self.status_filter = ttk.Combobox(toolbar, values=["Pending", "All", "Keep", "Reject"],
                                           state="readonly", width=10)
         self.status_filter.set("Pending")
@@ -239,14 +259,17 @@ class ClipReviewer:
         self.stop()
         status = self.status_filter.get().lower()
         group = self.speaker_filter.get()
-        self.visible = [p for p in self.store.files
+        reviewable = [p for p in self.store.files
+                      if not self.skip_fixed_tts.get() or not self.store.is_fixed_tts(p)]
+        self.visible = [p for p in reviewable
                         if (status == "all" or self.store.decisions.get(p.name, "pending") == status)
                         and (group == "All speakers" or self.group(p) == group)]
         self.listbox.delete(0, "end")
         for path in self.visible:
             self.listbox.insert("end", f"[{self.store.decisions.get(path.name, 'pending')}] {path.name}")
-        counts = Counter(self.store.decisions.get(p.name, "pending") for p in self.store.files)
+        counts = Counter(self.store.decisions.get(p.name, "pending") for p in reviewable)
         self.progress.configure(text=(f"{self.store.folder} — {len(self.store.files)} clips | "
+                                      f"TTS skipped {len(self.store.files) - len(reviewable)} | "
                                       f"Keep {counts['keep']} | Reject {counts['reject']} | "
                                       f"Pending {counts['pending']} | Showing {len(self.visible)}"))
         self.current = None
@@ -343,7 +366,7 @@ class ClipReviewer:
         destination = filedialog.askdirectory(parent=self.root, title="Copy kept clips to a separate folder")
         if destination:
             try:
-                count = self.store.export_kept(Path(destination))
+                count = self.store.export_kept(Path(destination), self.skip_fixed_tts.get())
                 messagebox.showinfo("Export complete", f"Copied {count} kept clips. Originals are unchanged.", parent=self.root)
             except Exception as exc:
                 messagebox.showerror("Export failed", str(exc), parent=self.root)

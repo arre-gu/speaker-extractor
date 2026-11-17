@@ -222,6 +222,14 @@ exports and plain WAV folders too, but transcript/speaker details require manife
   last decision. Autoplay can be turned off. Skip advances without a decision.
 - Filter by pending/all/kept/rejected clips and by recording + speaker. This makes
   it easy to browse voices without assuming a speaker is a real person or TTS.
+- **Skip fixed TTS prompts** is enabled by default. Clips whose manifest
+  transcripts contain "Continue straight", "Please slow down", or the word
+  "Attention" are skipped in every review view and excluded from kept-clip
+  exports, including previously kept matches. Matching ignores capitalization,
+  punctuation, and whitespace. The count of skipped clips is shown; existing
+  decisions and audio files are unchanged. Uncheck the box to inspect/include
+  those clips. Matching skips the entire clip even if it also contains a human
+  reply; clips without a transcript remain in the queue.
 - Decisions save immediately to `.review.json` beside the clips. Reopening the
   folder resumes with pending clips. Undo covers the current session only.
 - **Copy kept clips…** copies only kept WAVs to a separate folder and refuses

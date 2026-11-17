@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from review_clips import ClipReviewer, ReviewStore, prepare_playback
+from review_clips import ClipReviewer, ReviewStore, contains_fixed_tts_prompt, prepare_playback
 
 
 @pytest.fixture
@@ -76,6 +76,35 @@ def test_save_failure_rolls_back_memory(clips, monkeypatch):
     assert store.history == []
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("Continue straight.", True),
+    ("Please slow down.", True),
+    ("ATTENTION! There is a turn ahead.", True),
+    ("Prompt: continue,   straight. Response: okay.", True),
+    ("please\nslow down", True),
+    ("Pay attention to the road.", True),
+    ("The human replied yes.", False),
+    ("attentional task", False),
+    ("", False),
+])
+def test_fixed_tts_prompt_matching(text, expected):
+    assert contains_fixed_tts_prompt(text) is expected
+
+
+def test_prompt_skips_preserve_decisions_and_exclude_exports(clips, tmp_path):
+    store = ReviewStore(clips)
+    store.metadata["p_1.wav"]["text"] = "Continue straight."
+    store.mark("p_1.wav", "keep")
+    store.mark("p_2.wav", "keep")
+    before = (clips / ".review.json").read_bytes()
+    assert store.export_kept(tmp_path / "filtered") == 1
+    assert not (tmp_path / "filtered" / "p_1.wav").exists()
+    assert store.export_kept(tmp_path / "unfiltered", skip_fixed_tts=False) == 2
+    assert (clips / ".review.json").read_bytes() == before
+    assert (clips / "p_1.wav").exists()
+    assert not store.is_fixed_tts(clips / "p_10.wav")  # missing transcript
+
+
 @pytest.mark.parametrize("subtype", ["PCM_U8", "PCM_16", "PCM_24", "PCM_32"])
 def test_playback_conversion_preserves_source_and_timing(tmp_path, subtype):
     source = tmp_path / "source.wav"
@@ -118,5 +147,14 @@ def test_hidden_reviewer_navigation_and_decisions(clips, monkeypatch):
         app.refresh()
         assert [p.name for p in app.visible] == ["p_1.wav"]
         assert app.transcript.get("1.0", "end").strip() == "prompt"
+        app.store.metadata["p_1.wav"]["text"] = "Please slow down."
+        app.speaker_filter.set("All speakers")
+        app.refresh()
+        assert [p.name for p in app.visible] == ["p_2.wav", "p_10.wav"]
+        assert "TTS skipped 1" in app.progress.cget("text")
+        assert app.store.decisions["p_1.wav"] == "reject"
+        app.skip_fixed_tts.set(False)
+        app.refresh()
+        assert [p.name for p in app.visible] == ["p_1.wav", "p_2.wav", "p_10.wav"]
     finally:
         app.close()
